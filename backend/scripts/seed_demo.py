@@ -2,10 +2,12 @@ import json
 import numpy as np
 from sqlalchemy import select,func
 from src.config.database import Base,engine,SessionLocal
-from src.models import User,TraverseStudy,TraversePoint,FrequencyPlan,SpectrumRun,WeaveNote
+from src.models import User,TraverseStudy,TraversePoint,FrequencyPlan,SpectrumRun,WeaveNote,TraverseGroup,TraverseGroupMember,TraverseGroupRun
 from src.utils.security import hash_password
 from src.utils.serialize import row
 from src.services.analysis import analyze
+from src.services.groups import member_source,group_fingerprint
+from src.services.group_analysis import analyze_group
 
 def seed():
  Base.metadata.create_all(engine)
@@ -25,5 +27,19 @@ def seed():
   if not run:
    study=db.scalar(select(TraverseStudy).where(TraverseStudy.name==names[0]));points=[row(x) for x in db.scalars(select(TraversePoint).where(TraversePoint.study_id==study.id).order_by(TraversePoint.position))];plan=db.scalar(select(FrequencyPlan).where(FrequencyPlan.study_id==study.id));planrow=row(plan);result=analyze(row(study),points,planrow);run=SpectrumRun(study_id=study.id,plan_id=plan.id,name='A织片冻结网格谱峰研究',source_snapshot={'study':row(study),'points':points},plan_snapshot=planrow,status='completed',result=result,peak_frequency=result['best']['frequency'],max_power=result['observed_max_power'],global_p=result['global_test']['global_p'],created_by='analyst@lingdu.demo');db.add(run);db.commit()
   if not db.scalar(select(WeaveNote).where(WeaveNote.name=='A织片不等距补测初稿')):db.add(WeaveNote(run_id=run.id,name='A织片不等距补测初稿',interpretation='谱峰和全网格p提供空间周期证据，不能认定织机制造原因。',next_step='另取独立织片，预先保持频率计划并补测不等距位置，核对采样窗口和混叠。',result_snapshot=run.result,created_by='analyst@lingdu.demo'));db.commit()
-  counts={m.__tablename__:db.scalar(select(func.count()).select_from(m)) for m in [User,TraverseStudy,TraversePoint,FrequencyPlan,SpectrumRun,WeaveNote]};print(json.dumps(counts));return counts
+  group=db.scalar(select(TraverseGroup).where(TraverseGroup.name=='LD34-A/B联合置换组'))
+  if not group:
+   group=TraverseGroup(name='LD34-A/B联合置换组',protocol='先登记两条测线与各自冻结频率计划；按整组所有频点最大功率做联合置换，每条测线只在自身内部打乱厚度。恒厚对照不登记，以免退化成员被静默剔除。',permutations=199,seed=234,created_by='analyst@lingdu.demo');db.add(group);db.flush()
+   for index,name in enumerate(names[:2]):
+    study=db.scalar(select(TraverseStudy).where(TraverseStudy.name==name));plan=db.scalar(select(FrequencyPlan).where(FrequencyPlan.study_id==study.id));current=member_source(db,study.id,plan.id,index+1,name)
+    db.add(TraverseGroupMember(group_id=group.id,study_id=study.id,plan_id=plan.id,ordinal=index+1,label=name,study_snapshot=current['study'],plan_snapshot=current['plan'],source_fingerprint=current['source_fingerprint']))
+   db.commit()
+  group_run=db.scalar(select(TraverseGroupRun).where(TraverseGroupRun.name=='LD34双线联合置换研究'))
+  if not group_run:
+   group=db.scalar(select(TraverseGroup).where(TraverseGroup.name=='LD34-A/B联合置换组'));members=[member_source(db,m.study_id,m.plan_id,m.ordinal,m.label) for m in sorted(group.members,key=lambda m:m.ordinal)]
+   group_run=TraverseGroupRun(group_id=group.id,name='LD34双线联合置换研究',group_snapshot={'id':group.id,'name':group.name,'protocol':group.protocol,'permutations':group.permutations,'seed':group.seed},source_snapshot={'members':members},source_fingerprints=[{'ordinal':m['ordinal'],'study_id':m['study']['id'],'source_fingerprint':m['source_fingerprint']} for m in members],group_fingerprint=group_fingerprint(group,members),created_by='analyst@lingdu.demo');db.add(group_run);db.flush()
+   try:
+    result=analyze_group(group_run.group_snapshot,members,group_run.group_fingerprint);winner=result['winning_member'];group_run.status='completed';group_run.result=result;group_run.observed_max_power=result['observed_max_power'];group_run.global_p=result['global_test']['global_p'];group_run.winning_member_ordinal=winner['ordinal'];group_run.winning_study_id=winner['study_id'];group_run.winning_frequency=winner['frequency'];db.commit()
+   except Exception as error:group_run.status='failed';group_run.error=str(error)[:1000];db.commit()
+  counts={m.__tablename__:db.scalar(select(func.count()).select_from(m)) for m in [User,TraverseStudy,TraversePoint,FrequencyPlan,SpectrumRun,WeaveNote,TraverseGroup,TraverseGroupMember,TraverseGroupRun]};print(json.dumps(counts));return counts
 if __name__=='__main__':seed()

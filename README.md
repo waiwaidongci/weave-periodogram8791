@@ -20,13 +20,13 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 |账号 / 密码|页面和权限|典型动作|
 |---|---|---|
-|admin@lingdu.demo / Lingdu2026!|六页、写入、审批|批准或退回独立织片补测|
-|analyst@lingdu.demo / Lingdu2026!|六页、导入/修订/计划/运行/说明|冻结网格、真队列；审批403|
-|viewer@lingdu.demo / Lingdu2026!|六页只读、批准CSV|阅读全谱/窗口/全局p并导出；写入403|
+|admin@lingdu.demo / Lingdu2026!|七页、写入、审批|批准或退回独立织片补测；建立测线组|
+|analyst@lingdu.demo / Lingdu2026!|七页、导入/修订/计划/运行/说明|冻结网格、真队列、登记测线组；审批403|
+|viewer@lingdu.demo / Lingdu2026!|七页只读、批准CSV|阅读全谱/窗口/全局p/测线组结果并导出；写入403|
 
 `.env.example`列出三个端口、POSTGRES_DB/USER/PASSWORD、JWT_SECRET、SEED_DEMO、RATE_LIMIT_WRITES（默认60）。演示密码和JWT secret仅用于本地，部署须设置自己的值。首次启动自动seed，独立重复执行也幂等，不覆盖用户测点和说明。
 
-Compose恰好frontend/backend/worker/db/redis五服务，各有healthcheck。Nginx `/api/`移除前缀后转发FastAPI，前端探针127.0.0.1；backend等DB/Redis，worker再等backend。真实Celery任务保存JSON与数据库结果，后端/worker共享artifacts命名卷。停止清除本题演示数据：`docker compose down -v --remove-orphans`。
+Compose恰好frontend/backend/worker/db/redis五服务，各有healthcheck。Nginx `/api/`移除前缀后转发FastAPI，前端探针127.0.0.1；backend等DB/Redis，worker再等backend。真实Celery任务（单线`weave.analyze`与组`weave.analyze_group`）保存JSON与数据库结果，后端/worker共享artifacts命名卷。停止清除本题演示数据：`docker compose down -v --remove-orphans`。
 
 ## 谱分析员的一天
 
@@ -37,8 +37,9 @@ Compose恰好frontend/backend/worker/db/redis五服务，各有healthcheck。Ngi
 5. 从该测线的冻结计划排队。提交时源点和计划都复制进run，worker只使用这两份快照。
 6. A研究120点/201频点，选中18mm、功率.933678718814。全网格null最大值没有达到观测值，p=(0+1)/(199+1)=.005，而不是对挑出的频率报单频p。
 7. 读选频率带截距拟合、相对于x₀的幅度/相位、全部谱与采样窗口函数，核对混叠和泄漏。网格间距不是周期置信区间。
-8. 在“织片补测”写独立织片来源、保持预设网格和不等距补测位置的行动，不认定织机成因。
-9. 方绎批准或退回；苏纾下载批准全谱CSV。重复审批409，事后改点不能改写冻结运行或批准快照；过程留痕保留导入、计划、队列、审阅和导出。
+8. 若要从多条测线里挑最强谱峰，先在“测线组联合检验”登记组与各线冻结计划（组级B/seed），再从组排队。逐线全局p只校正该线内部搜频，不能承担跨线挑峰；组p按整组所有频点最大功率的联合零分布计算。异长测线可组合；登记后改点会使命中指纹不符，旧组标记失效，只能重算另存新组，旧结果不改写。
+9. 在“织片补测”写独立织片来源、保持预设网格和不等距补测位置的行动，不认定织机成因。
+10. 方绎批准或退回；苏纾下载批准全谱CSV。重复审批409，事后改点不能改写冻结运行或批准快照；过程留痕保留导入、计划、队列、审阅和导出。
 
 ## 数值口径
 
@@ -54,15 +55,17 @@ cos/sin列各减其均值形成A，QR分解A=QR。对中心化厚度y_c，解释
 
 采样窗口是`|mean(exp(i2πf(x−x₀)))|²`，只由位置决定，用来核对采样结构；它不能消除混叠。默认网格Δf约.00044444444 cycles/mm，不等于周期CI。该全局p只对预先冻结的搜索范围、iid可交换且同方差误差的无周期null解释，不是制造原因、在线诊断或任意后验挑范围的确认检验。
 
+测线组联合检验把这一口径扩到多线挑峰：登记组与每位成员的冻结计划后，组级B/seed由`SeedSequence`派生逐线子种子。每次抽取在每条测线自身的固定x上打乱厚度，重算该线所有纳入频点功率并取该线最大值，再取全部测线、全部频点的最大值，得到整组联合null最大值。`p_group=(1+#nullmax_group≥observedmax_group−tol)/(B+1)`。完整null（含逐线分列）另存于组运行；整组观测最大值对应的成员按登记序号打破并列。组检验要求每条线内部独立可交换，不假设测线之间同分布或同长度；异长、不同网格均可组合。缺失（无法取数/校验失败）或退化（如恒厚RSS0=0、全部频率秩不足）的成员不会被剔除，整组明确失败并在错误中指认该成员。
+
 ## 实体、界面与校验
 
-79个有职责的Python/TS/TSX/CSS文件（不含空包、依赖和dist）。五实体TraverseStudy → TraversePoint → FrequencyPlan → SpectrumRun → WeaveNote贯穿ORM/schema/service/routes、前端API/store和六页：谱峰总览、不等距测线、频率计划、完整谱与全局p、织片补测、过程留痕。
+有职责的Python/TS/TSX/CSS文件（不含空包、依赖和dist）。单线五实体TraverseStudy → TraversePoint → FrequencyPlan → SpectrumRun → WeaveNote贯穿ORM/schema/service/routes、前端API/store；测线组新增TraverseGroup → TraverseGroupMember → TraverseGroupRun，单线与组结果分表存放。七页：谱峰总览、不等距测线、频率计划、完整谱与全局p、测线组联合检验、织片补测、过程留痕。组页可建组、查看逐线完整谱、联合null与整组指纹；已登记组在列表中标失效原因。
 
 前端 `src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`；后端 `src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}`，另scripts/seed_demo.py与migrations/。SpectrumPlot、TracePlot、PeakSummary、RunList在多页复用，PermutationPanel只画后端实际null频数；useTask/useRoute和format处理交互。React挂载id=root与createRoot一致。
 
 Role/RunStatus/NoteStatus位于 `backend/src/constants/enums.py`，前端对应 `frontend/src/constants/enums.ts`。JWT、审计、RequestID/Error/Redis写限流三个中间件形成横切链路。配额按令牌摘要或无令牌IP分钟计数，默认60写请求，429含Retry-After；计数服务不可用503，健康GET不计。审批行锁使draft只能审一次，CSV取冻结result_snapshot。
 
-位置有限且0–1e12、测线跨度≤10000mm；厚度有限且0–1e6；频率严格递增、正且≤1周期/mm，3–401点，计划B199–499。NaN/Inf/bool数值参数、重复位置、错误测线/计划匹配均安全422；错误对象不回显非法input。PG数值列使用Double(asdecimal=False)，真实数据库类型double precision，API保持Python float。
+位置有限且0–1e12、测线跨度≤10000mm；厚度有限且0–1e6；频率严格递增、正且≤1周期/mm，3–401点，计划B199–499。测线组要求组名唯一、组内序号与测线均唯一（1–64位成员）、组B199–499与合法seed，成员计划必须属于该成员测线。NaN/Inf/bool数值参数、重复位置、错误测线/计划匹配均安全422；错误对象不回显非法input。PG数值列使用Double(asdecimal=False)，真实数据库类型double precision，API保持Python float。
 
 |层|实现|
 |---|---|
@@ -71,6 +74,8 @@ Role/RunStatus/NoteStatus位于 `backend/src/constants/enums.py`，前端对应 
 |队列|Celery5.4 / Kombu5.4.2 / Redis7，worker并发1|
 |算法|中心坐标QR全谱、全网格标签置换、采样窗口与选频拟合|
 
+演示seed另建“LD34-A/B联合置换组”（不含恒厚对照）并预计算组结果，单线A研究与其批准说明保持原样。
+
 本地前端 `cd frontend && npm ci && npm run dev`；`npm run build`执行tsc/Vite。后端安装requirements并设置DATABASE_URL/REDIS_URL/JWT_SECRET后运行uvicorn。当前ORM create_all初始化，migrations只作初始结构说明，不声称生产迁移链。MIT许可证见LICENSE。
 
-实际验收和边界见批次 `test-artifacts/gb-0034/TESTING.md`。关键JSON、CSV、PNG、原始.log、测试脚本和交付哈希都与源码分离。未验证外部真实织片、异方差/相关误差、生产压力或完整无障碍；令牌/IP分钟配额不是生产抗滥用全链路，换登录令牌可获新计数。Google字体断网回退本地字体。恒厚对照、纯18mm16点校验与120点噪声fixture是不同输入，结果不能互相冒充。
+实际验收和边界见批次 `test-artifacts/gb-0034/TESTING.md`。关键JSON、CSV、PNG、原始.log、测试脚本和交付哈希都与源码分离。未验证外部真实织片、异方差/相关误差、生产压力或完整无障碍；令牌/IP分钟配额不是生产抗滥用全链路，换登录令牌可获新计数。Google字体断网回退本地字体。恒厚对照、纯18mm16点校验与120点噪声fixture是不同输入，结果不能互相冒充。组联合检验只校正组内预登记搜索；组里挑出的最强峰仍不是单线确认、周期CI或制造原因，也不能用作在线诊断。
